@@ -1,4 +1,4 @@
-# PCA of Waveforms and Functional PCA… do they differ?
+## PCA of Waveforms and Functional PCA… do they differ?
 
 This repository contains code for implementing functional principal components analysis (fPCA) and PCA of waveforms on an exemplar biomechanical data set. The implementation takes place using both Matlab and R demonstrations. 
 
