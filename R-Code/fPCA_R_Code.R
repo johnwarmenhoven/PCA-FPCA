@@ -89,10 +89,13 @@ knee.pcastr = pca.fd(knee.fd$fd, nharm, kneePCAfdPar)
 
 # Extract important features from the knee.pcastr including the the mean function, fPC functions, proportion of variance for fPCs and scores.
 
-kneemeanfd = mean(knee.fd$fd)
+kneefdobj = knee.fd$fd
+kneevec = eval.fd(time, kneefdobj)
+kneemeanvec = apply(kneevec,1,mean)
+
 kneeharmfd  = knee.pcastr$harmonics
-kneemeanvec = eval.fd(time, kneemeanfd)
 kneeharmmat = eval.fd(time, kneeharmfd)
+
 kneevarprop = knee.pcastr$varprop
 kneescores = knee.pcastr$scores
 stdevfPCscores = apply(kneescores,2,sd)
@@ -154,6 +157,16 @@ ggplot(aes(x=PC1,y=PC2, label = id), data=plotscores)+
        y = "fPC2 Scores")
 
 #### Visualising rotated components
+
+# Performing a Varimax rotation.
+
+knee.pcastr_vx = varmx.pca.fd(knee.pcastr)
+
+kneeharmfd_vx = knee.pcastr_vx$harmonics
+kneeharmmat_vx = eval.fd(time, kneeharmfd_vx)
+kneevarprop_vx = knee.pcastr_vx$varprop
+kneescores_vx = knee.pcastr_vx$scores
+stdevfPCscores_vx = apply(kneescores_vx,2,sd)
 
 # Visualising rotated fPC1.
 
