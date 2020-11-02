@@ -1,0 +1,502 @@
+---
+title: "Tutorial for using fPCA in Biomechanics"
+author: 'John Warmenhoven, Norma Bargary, Dominik Liebl, Andrew Harrison, Mark Robinson, Edward Gunning & Giles Hooker'
+output:
+  html_document:
+    theme: paper
+    toc: yes
+    toc_depth: 5
+    toc_float: yes
+  pdf_document:
+    toc: yes
+    toc_depth: '5'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Data for this tutorial can be taken from the Functional Data Analysis website at: www.functionaldata.org, or from within the fda R package once it has been downloaded. 
+For any questions related to this tutorial (and script), please email john.warmenhoven@hotmail.com.
+
+All content from this tutorial can be found in two key texts. All theoretical information underpinning the use of these processes can be found at Ramsay and Silverman (2005). Additionally, a useful text outlining computational approaches for applying these processes in Matlab and R can be found at Ramsay, Hooker and Graves (2009).
+
+Load the fda library (once it has been installed).
+
+```{r, echo=T, message=F}
+library(fda)
+```
+
+The data can be loaded below from within the package location after download.
+
+```{r, echo=T}
+data(gait)
+```
+
+This loads open access data collected at the Motion Analysis Laboratory at Children's Hospital in California. Full details on the collection of the data can be found at Olshen, et al. (1989). In an R script some information about this data can be obtained from the help file by calling `gait`.
+
+The data consists of hip and knee joint curves of 39 children. Each curve consists of 20 data points across the gait cycle. This tutorial will only focus on the knee joint. 
+
+```{r, echo=T}
+knee = gait[,,2]
+```
+
+### FDA Preliminary Steps
+
+FDA involves a series of preliminary steps prior to applying any techniques. These are mainly centred around function fitting, smoothing processes and registration of data. 
+
+An example of function fitting and smoothing is included in this script, but registration was not necessary for this data set so was not included.
+
+The knees have been normalised to 20 data points using an interpolating cublic spline. Here they are centered within the time interval (which in this case after temporal normalization is percentage of the gait cycle).
+
+```{r, echo=T}
+time = seq(0, 100,length.out =  20)
+```
+
+The subject id's can be extracted from the gait data.
+
+```{r, echo=T}
+id = dimnames(gait)[[2]]
+```
+
+Using the knee, id and time data, an exploratory plot of the data can be constructed. Firstly, time and the knee angle data can be combined into a single data.frame, with the columns named according to the subject id's.
+
+```{r, echo=T}
+preplot_df = data.frame(time, knee)
+colnames(preplot_df) = c("time", id)
+```
+
+The data can then be 'melted' down to long form to get it ready for plotting using the `melt()` function from the reshape2 package.
+
+```{r, echo=T}
+library(reshape2) 
+preplot_df.mlt = melt(data=preplot_df, id.vars = "time", value.name = "knee", variable.name = "id")
+```
+
+A plot can be created to explore the raw data with the ggplot2 package, which will also be used later to visualise outputs from fPCA.
+
+```{r echo=T}
+library(ggplot2)
+
+theme_set(theme_classic())
+theme_update(plot.title = element_text(hjust = 0.5, size=20, face="bold"),
+             plot.subtitle = element_text(hjust = 0.5, size=16),
+             axis.title= element_text(size=16, face="bold"),
+             axis.text = element_text(size = 14))
+
+ggplot(data=preplot_df.mlt)+ 
+  geom_line(mapping=aes(x=time, y=knee, group=id, color=id))+
+  theme(legend.position = "none")+
+  labs(x = "Time (% Gait Cycle)",
+       y="Knee (°)",
+       title = "Gait Data",
+       subtitle = "Knee Angle for 39 repetitions of a 20 point gait cycle")
+```
+
+The next step involves representation of functions using a suitable basis expansion. This involves representing the observed curves as a linear (or weighted) combination of known functions (basis functions), where the coefficients (or weights) are chosen from the data.
+
+FDA has options for a number of different bases (i.e. Fourier, B-splines, Wavelets, etc.). In this demonstration the functions were fitted using B-splines, which are commonly drawn upon for biomechanics data. Spline functions are the most common choice of expansion for non-periodic functional data, which constitutes many types of human movements (i.e. movements that are not necessarily cyclical). 
+
+To set up for function fitting with B-splines, a fourth-order spline (cubic spline) is selected, the maximum number of functions is selected (at 20 basis functions), given that a smoothing parameter will be added later to the function fitting process. Smoothness of the data can also be manipulated by the number of basis functions selected (less basis functions results in a smoother fit of the functions).
+
+A cubic spline (spline of order 4) is selected as these are considered sufficient to approximate nearly all sufficiently smooth functions (with the knee angles in this tutorial being one example of this). If we were interested in velocity or acceleration, we may consider selecting a higher order spline (5th and 6th respectively).
+
+```{r, echo=T}
+kneebasis = create.bspline.basis(rangeval=c(0,100), nbasis=20, norder=4) 
+```
+
+When choosing the coefficients for the basis representation we want to penalise both fit to the observed data and roughness of our estimated function. Below we set up the penalty for roughness by defining a linear differential operator. This defines how we will smooth our data. If we want the original data to be smooth we penalise the second derivative, which is related directly to the curvature of our original data (and we do this by selecting 2 within the `int2Lfd` function). In this sense, `Lfdobj` is defining "what" is smooth.
+
+```{r, echo=T}
+Lfdobj = int2Lfd(2) 
+```
+
+If we wanted to focus on the smoothness of our first derivative (knee angular velocity in this instance) we would penalize the third derivative. Similarly knee angular acceleration smoothness would require penalizing the fourth derivative.
+
+We have defined how we plan to smooth the data, but before we can finish defining a functional parameter object, generalized cross validation (GCV) can be used to trial values of lambda (a smoothing parameter), to determine a suitable level of smoothing. 
+
+Lambda, also known as the roughness penalty parameter, controls the trade-off between the fit to the data and the roughness penalty we have defined. A large value of lambda would put more emphasis on the roughness penalty and result in a smoother estimated function. A smaller value would conversely put more emphasis on fit to the data and result in a less smooth estimated function.
+
+The GCV criterion (defined within this loop as `GCVsave`) is a measure of the predictive error for different values of lambda, with this often being trialled across a range of potential values. This is the most common way to get an estimate for an appropriate value of lambda and was first defined by Craven and Wahba (1979).
+
+Below is a for-loop for calculating GCV at a range of different values of lambda, varying between 100 and 1e-5 and being represented by `lam`.
+
+```{r, echo=T, results='hide'}
+lam         = c(100, 10, 1, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5)
+nlam        = length(lam)
+GCVsave        = rep(NA,nlam)
+Dfsave         = GCVsave
+for(ilam in 1:nlam){
+    print(c('lambda = ',lam[ilam]))
+    lambda        = lam[ilam]
+    fdParobj      = fdPar(kneebasis, Lfdobj, lambda)
+    sfd           = smooth.basis(time, knee, fdParobj)
+    Dfsave[ilam]  = sfd$df
+    GCVsave[ilam] = sum(sfd$gcv)
+}
+```
+
+Here is a plot of the GCV criterion at different values of lambda.
+
+```{r, echo=T}
+gcvplot_df = data.frame(lam, GCVsave)
+ggplot(data = gcvplot_df, mapping = aes(x=lam, y=GCVsave))+
+  geom_line()+
+  geom_point(size=3)+
+  labs(x=expression(lambda),
+       y = expression(GCV(lambda)),
+       title= "Lambda Selection")
+```
+
+Given that the GCV criterion relates directly to the predictive error for different values of lambda, a good starting point for selecting a value for lambda is the smallest GCV value trialled in the minimization routine (which in this case was 10). This may not always work perfectly in practice and should always be confirmed through visual inspection (i.e. graphing the fitted data).
+
+Now we can complete defining a functional parameter object smoothing and fitting the functions to the data. The results of GCV have suggested that a smoothing parameter of 10 may be suitable for this data.
+
+```{r, echo=T}
+smoothing.parameter = 10
+
+kneefdPar = fdPar(kneebasis, Lfdobj, smoothing.parameter)
+```
+
+The `fdPar` function serves as a way of capturing all the information required for function fitting and smoothing. This is inclusive of the expansion being used (in this case B-splines), what is being focused on for smoothing (in this case penalising the second derivative) and roughness penalty in the form of lambda (in this case a value of 10).
+
+### Functional Principal Components Analysis (fPCA)
+
+In fPCA we store all smoothed curves in the same functional data object using the 'smooth.basis' function. 
+
+```{r, echo=T}
+knee.fd = smooth.basis(time, knee, kneefdPar)
+```
+
+We have also listed the number of functional principal components to be retained as five.
+
+```{r, echo=T}
+nharm  = 5
+```
+
+Similar to the function fitting and smoothing processes described in the FDA (Preliminary Steps) section, it is also possible to smooth fPC functions as a part of describing them. This time a negligible smoothing parameter was selected (in this case 1e-15).
+
+```{r, echo=T}
+kneePCAfdPar = fdPar(kneebasis, Lfdobj, 1e-15)
+
+knee.pcastr = pca.fd(knee.fd$fd, nharm, kneePCAfdPar)
+```
+
+If researchers wish to have more control over graphing of the fPCs (similar to the example provided for conventional PCA), relevant parts of the FDA and fPCA processes can be extracted and called on for plotting. 
+
+Most of these will come from a list that has been built as a part of the 'pca.fd' function. In this case the list is called "knee.pcastr."
+
+The mean function can be extracted from the `knee.fd` functional data object and sampled at a given number of data points (in this case the same number as `knee.fd`). This is done in preparation for plotting the results:
+
+```{r, echo=T}
+kneefdobj = knee.fd$fd
+kneevec = eval.fd(time, kneefdobj)
+kneemeanvec = apply(kneevec,1,mean)
+```
+
+Similarly, the fPC functions (as functional data objects) can be called upon and re-sampled:
+
+```{r, echo=T}
+kneeharmfd  = knee.pcastr$harmonics
+kneeharmmat = eval.fd(time, kneeharmfd)
+```
+
+We can also identify the amount of variation attributed to each fPC by exploring the 'varprop' part of the struct. 
+
+```{r, echo=T}
+kneevarprop = knee.pcastr$varprop
+```
+
+And also derive the weights attributed to each of the individual curves relative to each fPC. These are also referred to as fPC scores (similar to PC scores in the previous example). 
+
+```{r, echo=T}
+kneescores = knee.pcastr$scores
+```
+
+Similar to PCA, a constant can be created to scale fPCs before adding and substracting them from the mean. A constant that is commonly used is 1 or 2 SDs of the fPC scores. So first the SD of fPC scores is calculated for each PC. 
+
+```{r, echo=T}
+stdevfPCscores = apply(kneescores,2,sd)
+```
+
+### Visualising Results
+
+To visualise results, outputs from fPCA can be integrated with the ggplot2 package.
+
+#### Plotting fPC1
+
+Firstly the data frame `plotdf_PC1` is created, which is composed of 1) `time`: a vector for time, 2) `mean`: the mean knee waveform, 3) `plus`: the mean knee waveform plus the first fPC (multiplied by a constant equivalent to 2SD of the fPC1 scores) and 4) `minus`: the mean knee waveform minus the first fPC (again multiplied by the same constant).
+
+The variance attributed to each fPC can also be extracted from `pcastr$varprop` and mapped into the title of the figure. This format of plotting the fPCs is in alignment with the __'legacy'__ format for publishing figures using fPCA.  
+
+```{r, echo=T}
+
+plotdf_PC1 = data.frame(time=time, mean=kneemeanvec, plus=kneemeanvec + 2*stdevfPCscores[1]*kneeharmmat[,1],minus= kneemeanvec-2*stdevfPCscores[1]*kneeharmmat[,1])
+colnames(plotdf_PC1) <- c("time", "mean","plus","minus")
+
+varprop1 = knee.pcastr$varprop[1]
+
+ggplot(data=plotdf_PC1)+
+  geom_point(mapping=aes(x=time, y=plus), shape='+', size = 4)+
+  geom_point(mapping=aes(x=time, y=minus), shape='-', size = 4)+
+  geom_line(mapping=aes(x=time, y=mean), linetype="solid", size = 1)+
+  labs(title="fPC1",
+       subtitle = paste("Proportion of Variance ", 100*round(varprop1,2), "%", sep=""),
+       x="Time (% Gait Cycle)",
+       y="Knee (°)")
+```
+
+#### Plotting fPC2
+
+The data frame `plotdf_PC2` can also be created similarly to plot fPC2. 
+
+```{r, echo=T}
+plotdf_PC2 = data.frame(time=time, mean=kneemeanvec, plus=kneemeanvec + 2*stdevfPCscores[2]*kneeharmmat[,2],minus= kneemeanvec-2*stdevfPCscores[2]*kneeharmmat[,2])
+colnames(plotdf_PC2) <- c("time", "mean","plus","minus")
+
+varprop2 = knee.pcastr$varprop[2]
+
+ggplot(data=plotdf_PC2)+
+  geom_point(mapping=aes(x=time, y=plus), shape='+', size = 4)+
+  geom_point(mapping=aes(x=time, y=minus), shape='-', size = 4)+
+  geom_line(mapping=aes(x=time, y=mean), linetype="solid", size = 1)+
+  labs(title="fPC2",
+       subtitle = paste("Proportion of Variance ", 100*round(varprop2,2), "%", sep=""),
+       x="Time (% Gait Cycle)",
+       y="Knee (°)")
+```
+
+#### Plotting fPC1 & fPC2 Scores
+
+The fPC scores for fPC1 & fPC2 can be vsiaulised using a scatter plot. 
+
+```{r, echo=T}
+plotscores = data.frame(id=id, kneescores)
+colnames(plotscores) = c("id","PC1", "PC2", "PC3", "PC4", "PC5")
+
+ggplot(mapping=aes(x=PC1, y=PC2), data=plotscores)+
+  geom_point(shape=1, size=3)+
+  labs(title = "Scatter Plot of fPC1 & fPC2 Scores",
+       x = "fPC1 Scores",
+       y = "fPC2 Scores")
+```
+
+We can also add subject id labels to this plot while making sure the labels don't overlap by using the ggrepel package.
+
+```{r, echo=T}
+library(ggrepel)
+
+ggplot(aes(x=PC1,y=PC2, label = id), data=plotscores)+
+  geom_point(shape=1, size=3)+
+  geom_label_repel()+
+  labs(title = "Scatter Plot of fPC1 & fPC2 Scores",
+       x = "fPC1 Scores",
+       y = "fPC2 Scores")
+```
+
+#### Dynamic fPC reconstruction
+
+Finally, we can create a reconstruction of knee angle curves using the fPCs. We'll start with the mean curve, and work back towards the original curves.
+
+The fPC functions offer a parsimonious representation of the orginal curves, We can approximate the original curves with a weighted combination of the five fPC functions.
+
+For example, in the first reconstruction state, for each subject we will have the mean curve plus their fPC1 score multiplied by the fPC1 function.
+
+
+```{r, message=F}
+kneemeanvec = as.vector(kneemeanvec)
+raw.mean  = replicate(39,kneemeanvec)
+meanplus.fpc1 = raw.mean + kneeharmmat[,1] %*% t(kneescores[,1])
+meanplus.fpc12 = raw.mean + kneeharmmat[,1:2] %*% t(kneescores[,1:2])
+meanplus.fpc123 = raw.mean + kneeharmmat[,1:3] %*% t(kneescores[,1:3])
+meanplus.fpc1234 = raw.mean + kneeharmmat[,1:4] %*% t(kneescores[,1:4])
+meanplus.fpc12345 = raw.mean + kneeharmmat[,1:5] %*% t(kneescores[,1:5])
+```
+
+And store these in a data.frame.
+
+```{r, message=F}
+means = rbind(raw.mean,
+              meanplus.fpc1,
+              meanplus.fpc12,
+              meanplus.fpc123,
+              meanplus.fpc1234,
+              meanplus.fpc12345)
+```
+
+We then create a name for each of these reconstruction states, while also replicating the time variable 6 times (one for each reconstruction state).
+
+```{r, echo=T}
+recon = c(rep("μ(t)",20),
+          rep("μ(t) + fPC1",20),
+          rep("μ(t) + fPC1 + fPC2",20),
+          rep("μ(t) + fPC1 + fPC2 + fPC3",20),
+          rep("μ(t) + fPC1 + fPC2 + fPC3 + fPC4",20),
+          rep("μ(t) + fPC1 + fPC2 + fPC3 + fPC4 + fPC5",20)
+)
+
+time.rec = rep(time, 6)
+```
+
+All this data is combined in a data.frame, while assigning appropriate column names. We can then melt it down to get it ready for plotting.
+
+```{r, message=F}
+recon.plot_df = data.frame(time.rec, reconstruction = recon, means)
+colnames(recon.plot_df) = c("time", "reconstruction", id)
+
+recon.plot_df.mlt = melt(recon.plot_df,
+                         id.vars = c("time", "reconstruction"),
+                         variable.name = "id",
+                         value.name = "knee")
+```
+
+We'll make use of dplyr for some small data manipulation steps, and gganimate to turn a ggplot into an animated GIF.
+
+```{r, warning=FALSE, message=F}
+library(gganimate)
+library(dplyr, quietly = TRUE)
+```
+
+The following code is written to include the cumulative proportion of variance explained in the animation title. It is a function that maps the reconstruction state to the cumulative proportion of variance explained at that stage.
+
+```{r}
+recon.index = c("μ(t)",
+          "μ(t) + fPC1",
+          "μ(t) + fPC1 + fPC2",
+          "μ(t) + fPC1 + fPC2 + fPC3",
+          "μ(t) + fPC1 + fPC2 + fPC3 + fPC4",
+          "μ(t) + fPC1 + fPC2 + fPC3 + fPC4 + fPC5")
+
+var_cumsum <- function(trans_state){
+  index = which(recon.index==trans_state)
+  cumsum1 = knee.pcastr$varprop %>% cumsum()
+  cumsum2 = c(0,cumsum1)
+  return(100*round(cumsum2[index],2))
+}
+```
+
+The data is now ready to ready to create the animation. We'll only choose a subset of the subjects so we can distinguish the curves.
+
+```{r, echo=T}
+boys = paste("boy", 10:18, sep="")
+```
+
+Create the reconstruction plot and a static plot of the original curves to compare to. We'll store these as `p1` and `p2` respectively.
+
+```{r, echo=T}
+recon.plot_df.mlt %>% filter(id %in% boys) %>%
+ggplot(mapping = aes(x=time, y=knee, group=interaction(id, reconstruction)))+
+  geom_point(mapping=aes(color=id))+
+  geom_line(mapping=aes(color=id))+
+  labs(title="fPCA reconstruction (Variance = {var_cumsum(previous_state)}%)",
+       subtitle = "{previous_state}",
+       x = "Time (% Gait Cycle)",
+       y="Knee (°)")+
+  theme(legend.position = "none",
+        plot.subtitle = element_text(hjust = 0, size=16, face = "italic"),
+        plot.title = element_text(hjust=0)) -> p1
+
+ggplot(data=filter(preplot_df.mlt, id %in% boys))+ 
+  geom_line(mapping=aes(x=time, y=knee, group=id, color=id))+
+  geom_point(mapping=aes(x=time, y=knee, group=id, color=id))+
+  theme(legend.position = "none",
+        axis.title = element_blank(),
+        axis.text = element_blank())-> p2
+
+
+```
+
+We inset the static plot into the reconstruction using `ggplotGrob()` and `annotation_custom()`. We then create the GIF animation by transitioning through different reconstruction states using the `transition_state()` function from the gganimate library. Those familiar with `facet_wrap()` from the standard ggplot library may see a resemblance in this approach.
+
+```{r, echo=T}
+g = ggplotGrob(p2) 
+p1 + annotation_custom(grob = g, xmin = 0, xmax = 50, ymin = 40, ymax = 80)+
+  transition_states(states = reconstruction)
+```
+
+### Varimax Rotation for fPCs
+
+Varimax rotations are used to construct new components based on original principal components ontained from the above process of using fPCA. Varimax rotations maximize the variability of the squared principal component weights, for a selected group of fPCs. The resulting modes of variability tend to be concentrated on a part of the range of the function in question. Generally this focuses more acutely on areas of the curve within original fPCs, making the results sometimes more easier to interpret. 
+
+#### Performing a Varimax rotation
+
+First we use the `varmx.pca.fd` function, entering the `knee.pcastr` list (from the original fPCA) as an input. `knee.pcastr_vx` is the outputted as a list with rotated components and recalculated scores. 
+
+```{r, echo=T}
+knee.pcastr_vx = varmx.pca.fd(knee.pcastr)
+```
+
+Using the `knee.pcastr_vx` list, rotated fPCs, scores and proportions of variance can be defined:
+
+```{r, echo=T}
+kneeharmfd_vx = knee.pcastr_vx$harmonics
+kneeharmmat_vx = eval.fd(time, kneeharmfd_vx)
+kneevarprop_vx = knee.pcastr_vx$varprop
+kneescores_vx = knee.pcastr_vx$scores
+stdevfPCscores_vx = apply(kneescores_vx,2,sd)
+```
+
+#### Visualising rotated components
+
+We can now follow the same convention as before for visualising rotated components and scores. 
+
+##### Visualising rotated fPC1
+
+```{r, echo=T}
+
+plotdf_PC1_vx = data.frame(time=time, mean=kneemeanvec, plus=kneemeanvec + 2*stdevfPCscores_vx[1]*kneeharmmat_vx[,1],minus= kneemeanvec-2*stdevfPCscores_vx[1]*kneeharmmat_vx[,1])
+colnames(plotdf_PC1_vx) <- c("time", "mean","plus","minus")
+
+varprop1_vx = knee.pcastr_vx$varprop[1]
+
+ggplot(data=plotdf_PC1_vx)+
+  geom_point(mapping=aes(x=time, y=plus), shape='+', size = 4)+
+  geom_point(mapping=aes(x=time, y=minus), shape='-', size = 4)+
+  geom_line(mapping=aes(x=time, y=mean), linetype="solid", size = 1)+
+  labs(title="fPC1",
+       subtitle = paste("Proportion of Variance ", 100*round(varprop1_vx,2), "%", sep=""),
+       x="Time (% Gait Cycle)",
+       y="Knee (°)")
+```
+
+##### Visualising rotated fPC2
+
+```{r, echo=T}
+
+plotdf_PC2_vx = data.frame(time=time, mean=kneemeanvec, plus=kneemeanvec + 2*stdevfPCscores_vx[2]*kneeharmmat_vx[,2],minus= kneemeanvec-2*stdevfPCscores_vx[2]*kneeharmmat_vx[,2])
+colnames(plotdf_PC2_vx) <- c("time", "mean","plus","minus")
+
+varprop2_vx = knee.pcastr_vx$varprop[2]
+
+ggplot(data=plotdf_PC2_vx)+
+  geom_point(mapping=aes(x=time, y=plus), shape='+', size = 4)+
+  geom_point(mapping=aes(x=time, y=minus), shape='-', size = 4)+
+  geom_line(mapping=aes(x=time, y=mean), linetype="solid", size = 1)+
+  labs(title="fPC1",
+       subtitle = paste("Proportion of Variance ", 100*round(varprop2_vx,2), "%", sep=""),
+       x="Time (% Gait Cycle)",
+       y="Knee (°)")
+```
+
+##### Plotting fPC1 & fPC2 Scores
+
+```{r, echo=T}
+plotscores_vx = data.frame(id=id, kneescores_vx)
+colnames(plotscores_vx) = c("id","PC1", "PC2", "PC3", "PC4", "PC5")
+
+ggplot(mapping=aes(x=PC1, y=PC2), data=plotscores_vx)+
+  geom_point(shape=1, size=3)+
+  labs(title = "Scatter Plot of fPC1 & fPC2 Scores",
+       x = "fPC1 Scores",
+       y = "fPC2 Scores")
+```
+
+### References
+
+Craven, P. & Wahba, G. (1979). Smoothing noisy data with spline functions: Estimating the correct degree of smoothing by the method of generalized crossvalidation. _Numerische Mathematik 31_, 377–403.
+
+Olshen, R. A., Biden, E. N., Wyatt, M. P. & Sutherland, D. H. (1989). Gait analysis and the bootstrap. _The Annals of Statistics_, 1419-1440.
+
+Ramsay, J. O., Hooker, G. & Graves, S. (2009). _Functional data analysis with R and MATLAB_, Springer, New York, NY.
+
+Ramsay J. O. & Silverman B. W. _Functional data analysis_, Wiley Online Library; 2005.

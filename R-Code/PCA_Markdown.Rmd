@@ -1,0 +1,198 @@
+---
+title: "Tutorial for using PCA of Waveforms in Biomechanics"
+author: 'John Warmenhoven, Norma Bargary, Dominik Liebl, Andrew Harrison, Mark Robinson, Edward Gunning & Giles Hooker'
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: paper
+    toc_depth: 5
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Data for this tutorial can be taken from the Functional Data Analysis website at: www.functionaldata.org, or from within the fda R package once it has been downloaded. 
+
+For any questions related to this tutorial (and script), please email john.warmenhoven@hotmail.com.
+
+Load the fda library (once it has been installed).
+
+```{r, echo=T, message=F}
+library(fda)
+```
+
+The data can be loaded below from within the package location after download.
+
+```{r, echo=T}
+data(gait)
+```
+
+This loads open access data collected at the Motion Analysis Laboratory at Children's Hospital in California. Full details on the collection of the data can be found at Olshen, et al. (1989). In an R script some information about this data can be obtained from the help file by calling `gait`.
+
+The data consists of hip and knee joint curves of 39 children. Each curve consists of 20 data points across the gait cycle. This tutorial will only focus on the knee joint. 
+
+```{r, echo=T}
+knee = gait[,,2]
+```
+
+### Running PCA of Waveforms
+
+The first step in in preparation is to transpose the knee curves. 
+
+```{r, echo=T}
+Knee_Curves = t(knee)
+```
+
+A time vector must be specified, which in this case is 100% of a gait cycle and that 100% is observed at 20 individual points. 
+
+```{r, echo=T}
+time = seq(0, 100,length.out =  20)
+```
+
+The subject id's can be extracted from the gait data also.
+
+```{r, echo=T}
+id = dimnames(gait)[[2]]
+```
+
+Using the knee, id and time data, an exploratory plot of the data can be constructed. Firstly, time and the knee angle data can be combined into a single data.frame, with the columns named according to the subject id's.
+
+```{r, echo=T}
+preplot_df = data.frame(time, knee)
+colnames(preplot_df) = c("time", id)
+```
+
+The data can then be 'melted' down to long form to get it ready for plotting using the `melt()` function from the reshape2 package.
+
+```{r, echo=T}
+library(reshape2) 
+preplot_df.mlt = melt(data=preplot_df, id.vars = "time", value.name = "knee", variable.name = "id")
+```
+
+A plot is then created to explore the raw data with the ggplot2 package, which will also be used later to visualise outputs from PCA.
+
+```{r echo=T}
+library(ggplot2)
+
+theme_set(theme_classic())
+theme_update(plot.title = element_text(hjust = 0.5, size=20, face="bold"),
+             plot.subtitle = element_text(hjust = 0.5, size=16),
+             axis.title= element_text(size=16, face="bold"),
+             axis.text = element_text(size = 14))
+
+ggplot(data=preplot_df.mlt)+ 
+  geom_line(mapping=aes(x=time, y=knee, group=id, color=id))+
+  theme(legend.position = "none")+
+  labs(x = "Time (% Gait Cycle)",
+       y="Knee (°)",
+       title = "Gait Data",
+       subtitle = "Knee Angle for 39 repetitions of a 20 point gait cycle")
+```
+
+#### `princomp` function
+
+The 'princomp' function is an inbuilt R function and can be applied to waveform data as a means of dimension reduction. This function returns a list with co-efficients: `$loadings`, which are principal components (PC) and PC scores `$scores`.
+
+```{r, echo=T}
+ClassicPCA <- princomp(t(knee),cor=FALSE,scores=TRUE)
+```
+
+The PCs can also be observed from a more practical perspective by adding and substracting them from the average/mean curve. To do this, first the mean curve is calculated:
+
+```{r, echo=T}
+mean_curve = apply(Knee_Curves,2,mean)
+```
+
+Then a constant is created to scale each of the PCs before adding and substracting them from the mean. A constant that is commonly used is 1 or 2 standard deviations (SD) of the PC scores. So first the SD of PC scores is calculated for each PC. 
+
+```{r, echo=T}
+stdevscores = apply(ClassicPCA$scores,2,sd)
+```
+
+And finally the percentage of variation attributed to each PC can be calculated using normalized standard deviations. 
+
+```{r, echo=T}
+PoV <- ClassicPCA$sdev^2/sum(ClassicPCA$sdev^2)
+```
+
+### Visualising Results
+
+To visualise results, outputs from PCA can be integrated with the ggplot2 package.
+
+```{r, echo=T}
+library(ggplot2)
+```
+
+#### Plotting PC1
+
+Firstly the data frame `plotdf_PC1` is created, which is composed of 1) `time`: a vector for time, 2) `mean`: the mean knee waveform, 3) `plus`: the mean knee waveform plus the first PC (multiplied by a constant equivalent to 2SD of the PC1 scores) and 4) `minus`: the mean knee waveform minus the first PC (again multiplied by the same constant).
+
+The variance attributed to each PC can also be extracted from `PoV` and mapped into the title of the figure.
+
+```{r, echo=T}
+
+plotdf_PC1 = data.frame(time=time, mean=mean_curve, plus=mean_curve + 2*stdevscores[1]*ClassicPCA$loadings[,1],minus= mean_curve-2*stdevscores[1]*ClassicPCA$loadings[,1])
+colnames(plotdf_PC1) <- c("time", "mean","plus","minus")
+
+ggplot(data=plotdf_PC1)+
+  geom_point(mapping=aes(x=time, y=plus), shape='+', size = 4)+
+  geom_point(mapping=aes(x=time, y=minus), shape='-', size = 4)+
+  geom_line(mapping=aes(x=time, y=mean), linetype="solid", size = 1)+
+  labs(title="PC1",
+       subtitle = paste("Proportion of Variance ", 100*round(PoV[1],2), "%", sep=""),
+       x="Time (% Gait Cycle)",
+       y="Knee (°)")
+```
+
+#### Plotting PC2
+
+The data frame `plotdf_PC2` can also be created similarly to plot PC2. 
+
+```{r, echo=T}
+
+plotdf_PC2 = data.frame(time=time, mean=mean_curve, plus=mean_curve + 2*stdevscores[2]*ClassicPCA$loadings[,2],minus= mean_curve-2*stdevscores[2]*ClassicPCA$loadings[,2])
+colnames(plotdf_PC2) <- c("time", "mean","plus","minus")
+
+ggplot(data=plotdf_PC2)+
+  geom_point(mapping=aes(x=time, y=plus), shape='+', size = 4)+
+  geom_point(mapping=aes(x=time, y=minus), shape='-', size = 4)+
+  geom_line(mapping=aes(x=time, y=mean), linetype="solid", size = 1)+
+  labs(title="PC2",
+       subtitle = paste("Proportion of Variance ", 100*round(PoV[2],2), "%", sep=""),
+       x="Time (% Gait Cycle)",
+       y="Knee (°)")
+```
+
+#### Plotting PC1 & PC2 Scores
+
+The PC scores for PC1 & PC2 can be vsiaulised using a scatter plot. 
+
+```{r, echo=T}
+plotscores = data.frame(id=id, ClassicPCA$scores)
+colnames(plotscores) = c("id","PC1", "PC2", "PC3", "PC4", "PC5")
+
+ggplot(mapping=aes(x=PC1, y=PC2), data=plotscores)+
+  geom_point(shape=1, size=3)+
+  labs(title = "Scatter Plot of PC1 & PC2 Scores",
+       x = "PC1 Scores",
+       y = "PC2 Scores")
+```
+
+We can also add subject id labels to this plot while making sure the labels don't overlap by using the ggrepel package.
+
+```{r, echo=T}
+library(ggrepel)
+
+ggplot(aes(x=PC1,y=PC2, label = id), data=plotscores)+
+  geom_point(shape=1, size=3)+
+  geom_label_repel()+
+  labs(title = "Scatter Plot of PC1 & PC2 Scores",
+       x = "PC1 Scores",
+       y = "PC2 Scores")
+```
+
+### References
+
+Olshen, R. A., Biden, E. N., Wyatt, M. P. & Sutherland, D. H. (1989). Gait analysis and the bootstrap. _The Annals of Statistics_, 1419-1440.
